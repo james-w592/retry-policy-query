@@ -39,6 +39,11 @@ give_up_on exception ValueError
   ranges, `exception` takes exception class names. `give_up_on` always
   wins over `retry_on` when both match. If no `retry_on` rules are
   present at all, everything not explicitly given up on is retried.
+- a rule can end with `except <values>` to carve exceptions out of an
+  otherwise broad match, e.g. `retry_on status 500..599 except 501` or
+  `give_up_on exception OSError except TimeoutError`. The `except`
+  values are checked against the same kind (`status` or `exception`)
+  as the rule they're attached to.
 
 ## Usage
 

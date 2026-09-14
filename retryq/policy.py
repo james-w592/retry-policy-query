@@ -16,6 +16,13 @@ A policy file is a small line-oriented format, one statement per line:
 Blank lines and lines starting with '#' are ignored. Status ranges use
 '..' rather than '-' so a range like 500..599 can't be confused with a
 negative number.
+
+A rule can carry an 'except' clause to carve out cases that would
+otherwise match, the same way a broad 'except Exception' in code can
+swallow more than intended:
+
+    retry_on status 500..599 except 501
+    retry_on exception OSError except FileNotFoundError, PermissionError
 """
 
 from __future__ import annotations
@@ -73,9 +80,15 @@ class RetryPolicy:
     retry_statuses: set[int] = field(default_factory=set)
     retry_status_ranges: list[tuple[int, int]] = field(default_factory=list)
     retry_exceptions: set[str] = field(default_factory=set)
+    retry_status_exclusions: set[int] = field(default_factory=set)
+    retry_status_exclusion_ranges: list[tuple[int, int]] = field(default_factory=list)
+    retry_exception_exclusions: set[str] = field(default_factory=set)
     giveup_statuses: set[int] = field(default_factory=set)
     giveup_status_ranges: list[tuple[int, int]] = field(default_factory=list)
     giveup_exceptions: set[str] = field(default_factory=set)
+    giveup_status_exclusions: set[int] = field(default_factory=set)
+    giveup_status_exclusion_ranges: list[tuple[int, int]] = field(default_factory=list)
+    giveup_exception_exclusions: set[str] = field(default_factory=set)
 
     @property
     def has_retry_rules(self) -> bool:
@@ -89,16 +102,20 @@ class RetryPolicy:
 
     def matches_retry(self, *, status: int | None, exception: str | None) -> bool:
         if status is not None and self._status_in(status, self.retry_statuses, self.retry_status_ranges):
-            return True
+            if not self._status_in(status, self.retry_status_exclusions, self.retry_status_exclusion_ranges):
+                return True
         if exception is not None and exception in self.retry_exceptions:
-            return True
+            if exception not in self.retry_exception_exclusions:
+                return True
         return False
 
     def matches_giveup(self, *, status: int | None, exception: str | None) -> bool:
         if status is not None and self._status_in(status, self.giveup_statuses, self.giveup_status_ranges):
-            return True
+            if not self._status_in(status, self.giveup_status_exclusions, self.giveup_status_exclusion_ranges):
+                return True
         if exception is not None and exception in self.giveup_exceptions:
-            return True
+            if exception not in self.giveup_exception_exclusions:
+                return True
         return False
 
 
@@ -239,12 +256,34 @@ class _Parser:
                 lineno, tokens[1].column + len(kind) + 1, f"expected at least one value after {directive} {kind}"
             )
 
-        if kind == "status":
-            self._parse_status_list(lineno, rest, is_retry=is_retry)
-        else:
-            self._parse_exception_list(lineno, rest, is_retry=is_retry)
+        except_index = self._find_except(rest)
+        main_tokens = rest[:except_index] if except_index is not None else rest
+        if not main_tokens:
+            raise self._error(lineno, rest[0].column, "expected at least one value before 'except'")
 
-    def _parse_status_list(self, lineno: int, tokens: list[_Token], *, is_retry: bool) -> None:
+        parse_list = self._parse_status_list if kind == "status" else self._parse_exception_list
+        parse_list(lineno, main_tokens, is_retry=is_retry, exclude=False)
+
+        if except_index is not None:
+            except_tok = rest[except_index]
+            exclusion_tokens = rest[except_index + 1 :]
+            second_except = self._find_except(exclusion_tokens)
+            if second_except is not None:
+                raise self._error(lineno, exclusion_tokens[second_except].column, "'except' can only appear once per rule")
+            if not exclusion_tokens:
+                raise self._error(
+                    lineno, except_tok.column + len(except_tok.text), "expected at least one value after 'except'"
+                )
+            parse_list(lineno, exclusion_tokens, is_retry=is_retry, exclude=True)
+
+    @staticmethod
+    def _find_except(tokens: list[_Token]) -> int | None:
+        for i, tok in enumerate(tokens):
+            if tok.kind == "IDENT" and tok.text == "except":
+                return i
+        return None
+
+    def _parse_status_list(self, lineno: int, tokens: list[_Token], *, is_retry: bool, exclude: bool = False) -> None:
         i = 0
         expect_value = True
         while i < len(tokens):
@@ -268,10 +307,10 @@ class _Parser:
                         raise self._error(lineno, high_tok.column, f"{high} is not a valid HTTP status code (100-599)")
                     if high < low:
                         raise self._error(lineno, high_tok.column, f"range {low}..{high} goes backwards")
-                    self._add_status_range(low, high, is_retry=is_retry)
+                    self._add_status_range(low, high, is_retry=is_retry, exclude=exclude)
                     i += 1
                 else:
-                    self._add_status(low, is_retry=is_retry)
+                    self._add_status(low, is_retry=is_retry, exclude=exclude)
                 expect_value = False
             else:
                 if tok.kind != "COMMA":
@@ -282,13 +321,21 @@ class _Parser:
             last = tokens[-1]
             raise self._error(lineno, last.column + len(last.text), "trailing ',' with nothing after it")
 
-    def _add_status(self, code: int, *, is_retry: bool) -> None:
-        (self.policy.retry_statuses if is_retry else self.policy.giveup_statuses).add(code)
+    def _add_status(self, code: int, *, is_retry: bool, exclude: bool = False) -> None:
+        if exclude:
+            target = self.policy.retry_status_exclusions if is_retry else self.policy.giveup_status_exclusions
+        else:
+            target = self.policy.retry_statuses if is_retry else self.policy.giveup_statuses
+        target.add(code)
 
-    def _add_status_range(self, low: int, high: int, *, is_retry: bool) -> None:
-        (self.policy.retry_status_ranges if is_retry else self.policy.giveup_status_ranges).append((low, high))
+    def _add_status_range(self, low: int, high: int, *, is_retry: bool, exclude: bool = False) -> None:
+        if exclude:
+            target = self.policy.retry_status_exclusion_ranges if is_retry else self.policy.giveup_status_exclusion_ranges
+        else:
+            target = self.policy.retry_status_ranges if is_retry else self.policy.giveup_status_ranges
+        target.append((low, high))
 
-    def _parse_exception_list(self, lineno: int, tokens: list[_Token], *, is_retry: bool) -> None:
+    def _parse_exception_list(self, lineno: int, tokens: list[_Token], *, is_retry: bool, exclude: bool = False) -> None:
         i = 0
         expect_value = True
         while i < len(tokens):
@@ -296,7 +343,10 @@ class _Parser:
             if expect_value:
                 if tok.kind != "IDENT":
                     raise self._error(lineno, tok.column, f"expected an exception name, found {tok.text!r}")
-                target = self.policy.retry_exceptions if is_retry else self.policy.giveup_exceptions
+                if exclude:
+                    target = self.policy.retry_exception_exclusions if is_retry else self.policy.giveup_exception_exclusions
+                else:
+                    target = self.policy.retry_exceptions if is_retry else self.policy.giveup_exceptions
                 target.add(tok.text)
                 i += 1
                 expect_value = False

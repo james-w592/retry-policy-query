@@ -155,6 +155,60 @@ def decide(
     return Decision(True, attempt, delay, policy.jitter == "full", reason)
 
 
+def lint_policy(policy: RetryPolicy) -> list[str]:
+    """Return warnings about a policy that parses fine but likely does the wrong thing.
+
+    These are semantic checks a plain syntax check can't catch: rules that
+    can never fire because give_up_on always wins ties, and except clauses
+    that carve out a value the rule never matched in the first place.
+    """
+    warnings: list[str] = []
+
+    if policy.max_attempts <= 1:
+        warnings.append(f"max_attempts is {policy.max_attempts}; no attempt will ever retry")
+
+    def status_covered(code: int, singles: set[int], ranges: list[tuple[int, int]]) -> bool:
+        return code in singles or any(lo <= code <= hi for lo, hi in ranges)
+
+    def range_covered(lo: int, hi: int, singles: set[int], ranges: list[tuple[int, int]]) -> bool:
+        if any(lo <= s <= hi for s in singles):
+            return True
+        return any(lo <= r_hi and r_lo <= hi for r_lo, r_hi in ranges)
+
+    for label, singles, ranges, ex_singles, ex_ranges in (
+        ("retry_on status", policy.retry_statuses, policy.retry_status_ranges,
+         policy.retry_status_exclusions, policy.retry_status_exclusion_ranges),
+        ("give_up_on status", policy.giveup_statuses, policy.giveup_status_ranges,
+         policy.giveup_status_exclusions, policy.giveup_status_exclusion_ranges),
+    ):
+        for code in sorted(ex_singles):
+            if not status_covered(code, singles, ranges):
+                warnings.append(f"'{label} ... except {code}' has no effect: {code} isn't matched by the rule it excludes from")
+        for lo, hi in ex_ranges:
+            if not range_covered(lo, hi, singles, ranges):
+                warnings.append(
+                    f"'{label} ... except {lo}..{hi}' has no effect: {lo}..{hi} isn't matched by the rule it excludes from"
+                )
+
+    for label, base, ex in (
+        ("retry_on exception", policy.retry_exceptions, policy.retry_exception_exclusions),
+        ("give_up_on exception", policy.giveup_exceptions, policy.giveup_exception_exclusions),
+    ):
+        for name in sorted(ex):
+            if name not in base:
+                warnings.append(f"'{label} ... except {name}' has no effect: {name} isn't matched by the rule it excludes from")
+
+    for code in sorted(policy.retry_statuses):
+        if policy.matches_giveup(status=code, exception=None):
+            warnings.append(f"retry_on status {code} can never retry: a give_up_on rule always matches it first")
+
+    for name in sorted(policy.retry_exceptions):
+        if policy.matches_giveup(status=None, exception=name):
+            warnings.append(f"retry_on exception {name} can never retry: a give_up_on rule always matches it first")
+
+    return warnings
+
+
 class _Parser:
     def __init__(self, filename: str, lines: list[str]) -> None:
         self.filename = filename

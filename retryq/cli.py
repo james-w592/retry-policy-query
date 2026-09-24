@@ -6,7 +6,7 @@ import argparse
 import sys
 
 from .errors import PolicyError
-from .policy import decide, parse_file
+from .policy import RetryPolicy, decide, lint_policy, parse_file
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -14,23 +14,34 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="retryq",
         description="Query a retry policy file: will a given attempt retry, and after how long?",
     )
-    parser.add_argument("policy_file", help="path to a .retry policy file")
-    parser.add_argument("--attempt", type=int, required=True, help="attempt number to evaluate (1 = first try)")
-    parser.add_argument("--status", type=int, default=None, help="HTTP status code returned by the attempt")
-    parser.add_argument("--exception", default=None, help="exception class name raised by the attempt")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    check = subparsers.add_parser("check", help="evaluate one attempt against a policy")
+    check.add_argument("policy_file", help="path to a .retry policy file")
+    check.add_argument("--attempt", type=int, required=True, help="attempt number to evaluate (1 = first try)")
+    check.add_argument("--status", type=int, default=None, help="HTTP status code returned by the attempt")
+    check.add_argument("--exception", default=None, help="exception class name raised by the attempt")
+
+    lint = subparsers.add_parser("lint", help="validate a policy file without evaluating it")
+    lint.add_argument("policy_file", help="path to a .retry policy file")
+
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
-
+def _load_policy(policy_file: str) -> RetryPolicy | None:
     try:
-        policy = parse_file(args.policy_file)
+        return parse_file(policy_file)
     except PolicyError as exc:
         print(exc, file=sys.stderr)
-        return 1
+        return None
     except OSError as exc:
-        print(f"retryq: cannot read {args.policy_file!r}: {exc.strerror}", file=sys.stderr)
+        print(f"retryq: cannot read {policy_file!r}: {exc.strerror}", file=sys.stderr)
+        return None
+
+
+def _run_check(args: argparse.Namespace) -> int:
+    policy = _load_policy(args.policy_file)
+    if policy is None:
         return 1
 
     if args.attempt < 1:
@@ -49,6 +60,31 @@ def main(argv: list[str] | None = None) -> int:
         print(f"retry: no — {decision.reason}")
 
     return 0
+
+
+def _run_lint(args: argparse.Namespace) -> int:
+    policy = _load_policy(args.policy_file)
+    if policy is None:
+        return 1
+
+    warnings = lint_policy(policy)
+    for warning in warnings:
+        print(f"{args.policy_file}: warning: {warning}")
+
+    if warnings:
+        print(f"{args.policy_file}: {len(warnings)} warning(s)")
+    else:
+        print(f"{args.policy_file}: OK")
+
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+
+    if args.command == "lint":
+        return _run_lint(args)
+    return _run_check(args)
 
 
 if __name__ == "__main__":

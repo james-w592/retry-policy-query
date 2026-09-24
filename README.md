@@ -48,22 +48,38 @@ give_up_on exception ValueError
 ## Usage
 
 ```
-$ retryq policy.retry --attempt 1 --status 503
+$ retryq check policy.retry --attempt 1 --status 503
 retry: yes, wait 0.50s — matched retry_on rule
 
-$ retryq policy.retry --attempt 3 --status 503
+$ retryq check policy.retry --attempt 3 --status 503
 retry: yes, wait 2.00s — matched retry_on rule
 
-$ retryq policy.retry --attempt 1 --status 404
+$ retryq check policy.retry --attempt 1 --status 404
 retry: no — matched a give_up_on rule
 
-$ retryq policy.retry --attempt 5 --status 503
+$ retryq check policy.retry --attempt 5 --status 503
 retry: no — max_attempts (5) reached
 ```
 
 (`jitter = none` in the examples above so the delays come out exact;
 with `jitter = full` the output reads "wait up to 2.00s (full
 jitter)".)
+
+`retryq lint` checks a policy file without evaluating anything against
+it. It catches the same syntax errors `check` would, plus a few things
+that parse fine but are probably a mistake: a `give_up_on` rule that
+silently eats every case a `retry_on` rule was meant to cover, or an
+`except` clause that carves out a value the rule never matched in the
+first place.
+
+```
+$ retryq lint policy.retry
+policy.retry: warning: retry_on status 503 can never retry: a give_up_on rule always matches it first
+policy.retry: 1 warning(s)
+
+$ retryq lint good_policy.retry
+good_policy.retry: OK
+```
 
 You can also use it as a library:
 
@@ -82,7 +98,7 @@ errors point at the exact character that's wrong instead of just
 naming the line:
 
 ```
-$ retryq policy.retry --attempt 1
+$ retryq check policy.retry --attempt 1
 policy.retry:2:14: error: expected a number, found 'fast'
     base_delay = fast
                  ^

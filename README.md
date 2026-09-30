@@ -33,8 +33,13 @@ give_up_on exception ValueError
 - `max_attempts`, `base_delay`, `multiplier`, `max_delay` — the usual
   exponential backoff parameters. Delay for attempt N is
   `base_delay * multiplier ** (N - 1)`, capped at `max_delay`.
-- `jitter` — `none` or `full`. `full` means the real delay is a
-  random value between 0 and the computed delay.
+- `jitter` — `none`, `full` or `decorrelated`. `full` means the real
+  delay is a random value between 0 and the computed delay.
+  `decorrelated` draws each wait from `base_delay` up to three times
+  the previous wait, so `multiplier` is ignored. `retryq` doesn't know
+  what the previous wait was, so `check` reports the widest possible
+  range: `base_delay` to `base_delay * 3 ** N` for attempt N, capped at
+  `max_delay`.
 - `retry_on` / `give_up_on` — `status` takes HTTP codes and `low..high`
   ranges, `exception` takes exception class names. `give_up_on` always
   wins over `retry_on` when both match. If no `retry_on` rules are
@@ -63,7 +68,8 @@ retry: no — max_attempts (5) reached
 
 (`jitter = none` in the examples above so the delays come out exact;
 with `jitter = full` the output reads "wait up to 2.00s (full
-jitter)".)
+jitter)". With `jitter = decorrelated` and `base_delay = 0.5` it reads
+"wait between 0.50s and 1.50s (decorrelated jitter)" for attempt 1.)
 
 `retryq lint` checks a policy file without evaluating anything against
 it. It catches the same syntax errors `check` would, plus a few things

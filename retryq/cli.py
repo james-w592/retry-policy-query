@@ -52,7 +52,13 @@ def _run_check(args: argparse.Namespace) -> int:
 
     if decision.should_retry:
         assert decision.delay_seconds is not None
-        if decision.jittered:
+        if decision.jitter_mode == "decorrelated":
+            assert decision.min_delay_seconds is not None
+            print(
+                f"retry: yes, wait between {decision.min_delay_seconds:.2f}s and "
+                f"{decision.delay_seconds:.2f}s (decorrelated jitter) — {decision.reason}"
+            )
+        elif decision.jittered:
             print(f"retry: yes, wait up to {decision.delay_seconds:.2f}s (full jitter) — {decision.reason}")
         else:
             print(f"retry: yes, wait {decision.delay_seconds:.2f}s — {decision.reason}")

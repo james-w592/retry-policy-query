@@ -47,7 +47,7 @@ _TOKEN_RE = re.compile(
 )
 
 _ASSIGN_KEYS = {"max_attempts", "base_delay", "multiplier", "max_delay", "jitter"}
-_JITTER_MODES = {"none", "full"}
+_JITTER_MODES = {"none", "full", "decorrelated"}
 _DIRECTIVES = _ASSIGN_KEYS | {"retry_on", "give_up_on"}
 
 
@@ -126,6 +126,10 @@ class Decision:
     delay_seconds: float | None
     jittered: bool
     reason: str
+    # Only set for decorrelated jitter, where the wait is drawn from
+    # [min_delay_seconds, delay_seconds] instead of [0, delay_seconds].
+    min_delay_seconds: float | None = None
+    jitter_mode: str = "none"
 
 
 def decide(
@@ -147,12 +151,25 @@ def decide(
     if policy.has_retry_rules and not policy.matches_retry(status=status, exception=exception):
         return Decision(False, attempt, None, False, "did not match any retry_on rule")
 
+    reason = "matched retry_on rule" if policy.has_retry_rules else "no retry_on rules; retrying by default"
+
+    if policy.jitter == "decorrelated":
+        # Each wait is drawn from [base, previous_wait * 3], starting with
+        # previous_wait = base. Nothing here knows the wait actually taken
+        # last time, so report the widest range that is possible: the upper
+        # bound triples every attempt. multiplier plays no part in this mode.
+        upper = policy.base_delay * (3 ** attempt)
+        lower = policy.base_delay
+        if policy.max_delay is not None:
+            upper = min(upper, policy.max_delay)
+            lower = min(lower, policy.max_delay)
+        return Decision(True, attempt, upper, True, reason, min_delay_seconds=lower, jitter_mode="decorrelated")
+
     delay = policy.base_delay * (policy.multiplier ** (attempt - 1))
     if policy.max_delay is not None:
         delay = min(delay, policy.max_delay)
 
-    reason = "matched retry_on rule" if policy.has_retry_rules else "no retry_on rules; retrying by default"
-    return Decision(True, attempt, delay, policy.jitter == "full", reason)
+    return Decision(True, attempt, delay, policy.jitter == "full", reason, jitter_mode=policy.jitter)
 
 
 def lint_policy(policy: RetryPolicy) -> list[str]:
